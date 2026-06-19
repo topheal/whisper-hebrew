@@ -7,10 +7,12 @@ folders:
   #
   # summarize: false (או לא לכתוב כלל) = ברירת המחדל - רק SRT, מנוע מקומי, בלי Claude Code
   # summarize: true                    = בנוסף ל-SRT, גם _summary.txt דרך claude -p
+  # maxdays: N                         = לתמלל רק קבצים שהשתנו/נוצרו בN הימים האחרונים (לא לכתוב = בלי הגבלה)
   #
   # - path: 'G:\האחסון שלי\תיקייה לדוגמה'
   #   recursive: true
   #   summarize: false
+  #   maxdays: 30
   #
   # - path: 'C:\Users\admin\Downloads\שיחות חשובות'
   #   recursive: false

@@ -38,10 +38,14 @@ def is_stable(path: Path, wait=3.0) -> bool:
         return False
 
 
-def find_media_groups(folder: Path, recursive: bool, extensions: list[str]) -> list[Path]:
+def find_media_groups(folder: Path, recursive: bool, extensions: list[str], maxdays: float | None = None) -> list[Path]:
     """מאתר קבצי מדיה בתיקייה, מאחד audio+video עם אותו שם לקובץ אחד"""
     pattern = "**/*" if recursive else "*"
     candidates = [p for p in folder.glob(pattern) if p.is_file() and p.suffix.lower().lstrip(".") in extensions]
+
+    if maxdays is not None:
+        cutoff = time.time() - maxdays * 86400
+        candidates = [p for p in candidates if p.stat().st_mtime >= cutoff]
 
     groups: dict[str, list[Path]] = {}
     for p in candidates:
@@ -153,11 +157,12 @@ def run_scan():
         folder = Path(folder_cfg["path"])
         recursive = folder_cfg.get("recursive", False)
         summarize = folder_cfg.get("summarize", False)
+        maxdays = folder_cfg.get("maxdays")
         if not folder.exists():
             print(f"אזהרה: התיקייה לא נמצאה: {folder}")
             continue
 
-        for media_path in find_media_groups(folder, recursive, extensions):
+        for media_path in find_media_groups(folder, recursive, extensions, maxdays):
             if needs_processing(media_path, summarize) and is_stable(media_path):
                 queue.append((media_path, summarize))
 
