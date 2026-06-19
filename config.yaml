@@ -4,8 +4,17 @@
 folders:
   # TODO: עדכן כאן את התיקיות שאתה רוצה לסרוק (סדר = עדיפות)
   # אפשר להעתיק נתיב ישירות ממנהל הקבצים של Windows - השתמש בגרשיים יחידים '...'
+  #
+  # summarize: false (או לא לכתוב כלל) = ברירת המחדל - רק SRT, מנוע מקומי, בלי Claude Code
+  # summarize: true                    = בנוסף ל-SRT, גם _summary.txt דרך claude -p
+  #
   # - path: 'G:\האחסון שלי\תיקייה לדוגמה'
   #   recursive: true
+  #   summarize: false
+  #
+  # - path: 'C:\Users\admin\Downloads\שיחות חשובות'
+  #   recursive: false
+  #   summarize: true
 
 # כל כמה דקות לסרוק את התיקיות ברקע (60 = שעה)
 scan_interval_minutes: 60

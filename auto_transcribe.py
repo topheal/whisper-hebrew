@@ -1,5 +1,6 @@
 """
-תמלול אוטומטי לתיקיות מוגדרות + סיכום עם Claude Code (headless, ללא מפתח API)
+תמלול אוטומטי לתיקיות מוגדרות (SRT) + סיכום אופציונלי עם Claude Code (headless, ללא מפתח API)
+ברירת המחדל לכל תיקייה: רק SRT (מנוע מקומי). סיכום מופעל לפי הדגל summarize בקובץ ההגדרות.
 שימוש: python auto_transcribe.py            (סריקה חד-פעמית, מכבד עדיפות תיקיות)
        python auto_transcribe.py --loop      (סריקה חוזרת לפי scan_interval_minutes)
 """
@@ -61,12 +62,15 @@ def outputs_for(media_path: Path) -> tuple[Path, Path]:
     return srt_path, summary_path
 
 
-def needs_processing(media_path: Path) -> bool:
+def needs_processing(media_path: Path, summarize: bool) -> bool:
     srt_path, summary_path = outputs_for(media_path)
-    if not srt_path.exists() or not summary_path.exists():
-        return True
     media_mtime = media_path.stat().st_mtime
-    return srt_path.stat().st_mtime < media_mtime or summary_path.stat().st_mtime < media_mtime
+
+    if not srt_path.exists() or srt_path.stat().st_mtime < media_mtime:
+        return True
+    if summarize and (not summary_path.exists() or summary_path.stat().st_mtime < media_mtime):
+        return True
+    return False
 
 
 def format_srt_timestamp(seconds: float) -> str:
@@ -122,11 +126,14 @@ def summarize_with_claude(text: str) -> str:
     return result.stdout.strip()
 
 
-def process_file(media_path: Path, model_size: str):
+def process_file(media_path: Path, model_size: str, summarize: bool):
     print(f"[{media_path.name}] טוען מודל ומתמלל...")
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
     srt_path, full_text = transcribe_to_srt(model, media_path)
     print(f"[{media_path.name}] תמלול נשמר: {srt_path.name}")
+
+    if not summarize:
+        return
 
     print(f"[{media_path.name}] מסכם עם Claude Code...")
     summary = summarize_with_claude(full_text)
@@ -141,17 +148,18 @@ def run_scan():
     max_parallel = config.get("max_parallel", 1)
     model_size = config.get("model_size", "medium")
 
-    queue: list[Path] = []
+    queue: list[tuple[Path, bool]] = []
     for folder_cfg in config.get("folders") or []:
         folder = Path(folder_cfg["path"])
         recursive = folder_cfg.get("recursive", False)
+        summarize = folder_cfg.get("summarize", False)
         if not folder.exists():
             print(f"אזהרה: התיקייה לא נמצאה: {folder}")
             continue
 
         for media_path in find_media_groups(folder, recursive, extensions):
-            if needs_processing(media_path) and is_stable(media_path):
-                queue.append(media_path)
+            if needs_processing(media_path, summarize) and is_stable(media_path):
+                queue.append((media_path, summarize))
 
     if not queue:
         print("אין קבצים חדשים לתמלל.")
@@ -160,7 +168,7 @@ def run_scan():
     print(f"נמצאו {len(queue)} קבצים לתמלול (לפי סדר עדיפות התיקיות).")
 
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
-        futures = [executor.submit(process_file, p, model_size) for p in queue]
+        futures = [executor.submit(process_file, p, model_size, summarize) for p, summarize in queue]
         for f in futures:
             f.result()
 
