@@ -10,6 +10,16 @@ import threading
 import subprocess
 from pathlib import Path
 
+_last_output_widget = None
+
+
+def copy_output():
+    if _last_output_widget is None:
+        return
+    text = _last_output_widget.get("1.0", tk.END)
+    _last_output_widget.clipboard_clear()
+    _last_output_widget.clipboard_append(text)
+
 SUPPORTED = [
     ("קבצי אודיו/וידאו", "*.mp3 *.mp4 *.wav *.m4a *.ogg *.flac *.webm *.mkv *.aac *.wma"),
     ("כל הקבצים", "*.*"),
@@ -92,6 +102,22 @@ def main():
         height=20,
     )
     output.pack(fill=tk.BOTH, expand=True)
+
+    global _last_output_widget
+    _last_output_widget = output
+
+    copy_btn = tk.Button(
+        frame,
+        text="העתק טקסט",
+        font=("Arial", 10),
+        bg="#333",
+        fg="#ccc",
+        padx=10,
+        pady=4,
+        cursor="hand2",
+        command=copy_output,
+    )
+    copy_btn.pack(pady=(8, 0))
 
     btn.config(command=lambda: pick_and_transcribe(output, btn))
     root.mainloop()

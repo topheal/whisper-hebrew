@@ -67,6 +67,53 @@ python transcribe.py "נתיב/לקובץ.mp3"
 
 ## שימוש עם Claude Code
 
-העתק את תיקיית `.claude/skills/transcribe` לתוך `~/.claude/skills/` שלך.
+העתק את תיקיות `.claude/skills/transcribe` ו-`.claude/skills/auto-transcribe` לתוך `~/.claude/skills/` שלך.
 
-אחר כך פשוט כתוב לקלוד: **"תמלל לי את הקובץ..."**
+אחר כך פשוט כתוב לקלוד: **"תמלל לי את הקובץ..."** או **"סרוק את התיקיות"**
+
+---
+
+## תמלול אוטומטי לתיקיות (Google Drive ועוד)
+
+מערכת שסורקת תיקיות מוגדרות, מתמללת קבצים חדשים אוטומטית, ומפיקה לכל קובץ:
+- `<שם>.srt` — תמלול מלא עם תזמונים מדויקים
+- `<שם>_summary.txt` — סיכום שמופק ע"י Claude Code (headless, דרך המנוי הקיים - בלי מפתח API נפרד ובלי עלות נוספת)
+
+### הגדרה
+
+ערוך את `config.yaml`:
+```yaml
+folders:
+  - path: 'G:\האחסון שלי\שיחות מוקלטות'
+    recursive: true
+  - path: 'C:\Users\you\Downloads'
+    recursive: false
+
+scan_interval_minutes: 60   # תדירות סריקה ברקע
+max_parallel: 1              # כמה קבצים לתמלל במקביל
+model_size: medium
+```
+שימוש בגרשיים יחידים `'...'` מאפשר להעתיק נתיב ישירות ממנהל הקבצים של Windows בלי לשנות אותו (גרשיים כפולים `"..."` דורשים הכפלת כל `\`).
+
+סדר התיקיות ברשימה = סדר עדיפות (הראשונה מטופלת ראשונה).
+
+הסיכום האוטומטי מופק ע"י הפעלת `claude -p` (Claude Code headless) - דורש שה-CLI מותקן ומחובר (`claude --version` עובד תקין).
+
+### הרצה
+
+**חד-פעמית, על פי דרישה:**
+```bash
+python auto_transcribe.py
+```
+או הרץ `scan_now.bat`.
+
+**ברקע, אוטומטית כל שעה (Windows Task Scheduler):**
+```bash
+register_task.bat
+```
+להסרה: `schtasks /delete /tn "WhisperHebrewAutoTranscribe" /f`
+
+### התנהגות
+- קובץ אודיו וקובץ וידאו עם אותו שם — מתומלל פעם אחת בלבד (מועדף אודיו, מהיר יותר)
+- קבצים שכבר תומללו (יש להם `.srt` + `_summary.txt` עדכניים) מדולגים
+- קבצים שבתהליך סנכרון (Google Drive) מדולגים ויטופלו בסריקה הבאה
