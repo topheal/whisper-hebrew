@@ -162,15 +162,19 @@ def run_scan():
             print(f"אזהרה: התיקייה לא נמצאה: {folder}")
             continue
 
-        for media_path in find_media_groups(folder, recursive, extensions, maxdays):
-            if needs_processing(media_path, summarize) and is_stable(media_path):
-                queue.append((media_path, summarize))
+        folder_files = [
+            media_path
+            for media_path in find_media_groups(folder, recursive, extensions, maxdays)
+            if needs_processing(media_path, summarize) and is_stable(media_path)
+        ]
+        folder_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        queue.extend((media_path, summarize) for media_path in folder_files)
 
     if not queue:
         print("אין קבצים חדשים לתמלל.")
         return
 
-    print(f"נמצאו {len(queue)} קבצים לתמלול (לפי סדר עדיפות התיקיות).")
+    print(f"נמצאו {len(queue)} קבצים לתמלול (לפי סדר עדיפות התיקיות, ובתוך כל תיקייה - החדשים ביותר ראשון).")
 
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
         futures = [executor.submit(process_file, p, model_size, summarize) for p, summarize in queue]
