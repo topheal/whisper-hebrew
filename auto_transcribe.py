@@ -24,6 +24,7 @@ LOCK_PATH = Path(__file__).parent / "scan.lock"
 STALE_LOCK_HOURS = 6  # אם סריקה קודמת "תקועה" יותר מזה - מתעלמים מהנעילה ומתחילים בכל זאת
 
 AUDIO_EXT_PRIORITY = ["mp3", "wav", "m4a", "ogg", "flac", "aac", "wma", "mp4", "webm", "mkv"]
+VIDEO_EXTENSIONS = {"mp4", "webm", "mkv"}
 RAW_TAG_RE = re.compile(r"(?i)\braw\b")
 
 
@@ -136,6 +137,17 @@ def transcribe_to_srt(model: WhisperModel, media_path: Path) -> tuple[Path, str]
     return srt_path, "\n".join(full_text_lines)
 
 
+def extract_audio_file(video_path: Path) -> Path:
+    """מחלץ פס קול מקובץ וידאו ל-mp3 לצידו, באמצעות ffmpeg (לא לצורך התמלול - לנוחות האזנה)"""
+    audio_path = video_path.with_suffix(".mp3")
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "libmp3lame", "-q:a", "4", str(audio_path)],
+        capture_output=True,
+        check=True,
+    )
+    return audio_path
+
+
 def summarize_with_claude(text: str) -> str:
     """מפעיל את Claude Code במצב headless (claude -p) - דרך המנוי הקיים, בלי מפתח API נפרד"""
     prompt = (
@@ -157,7 +169,17 @@ def summarize_with_claude(text: str) -> str:
     return result.stdout.strip()
 
 
-def process_file(media_path: Path, model_size: str, summarize: bool):
+def process_file(media_path: Path, model_size: str, summarize: bool, extract_audio: bool):
+    if extract_audio and media_path.suffix.lower().lstrip(".") in VIDEO_EXTENSIONS:
+        audio_path = media_path.with_suffix(".mp3")
+        if not audio_path.exists():
+            print(f"[{media_path.name}] מחלץ קובץ אודיו...")
+            try:
+                extract_audio_file(media_path)
+                print(f"[{media_path.name}] קובץ אודיו נשמר: {audio_path.name}")
+            except subprocess.CalledProcessError as e:
+                print(f"[{media_path.name}] חילוץ אודיו נכשל: {e}")
+
     print(f"[{media_path.name}] טוען מודל ומתמלל...")
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
     srt_path, full_text = transcribe_to_srt(model, media_path)
@@ -179,11 +201,12 @@ def run_scan():
     max_parallel = config.get("max_parallel", 1)
     model_size = config.get("model_size", "medium")
 
-    queue: list[tuple[Path, bool]] = []
+    queue: list[tuple[Path, bool, bool]] = []
     for folder_cfg in config.get("folders") or []:
         folder = Path(folder_cfg["path"])
         recursive = folder_cfg.get("recursive", True)
         summarize = folder_cfg.get("summarize", False)
+        extract_audio = folder_cfg.get("extract_audio", False)
         maxdays = folder_cfg.get("maxdays")
         if not folder.exists():
             print(f"אזהרה: התיקייה לא נמצאה: {folder}")
@@ -195,7 +218,7 @@ def run_scan():
             if needs_processing(media_path, summarize) and is_stable(media_path)
         ]
         folder_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        queue.extend((media_path, summarize) for media_path in folder_files)
+        queue.extend((media_path, summarize, extract_audio) for media_path in folder_files)
 
     if not queue:
         print("אין קבצים חדשים לתמלל.")
@@ -204,7 +227,10 @@ def run_scan():
     print(f"נמצאו {len(queue)} קבצים לתמלול (לפי סדר עדיפות התיקיות, ובתוך כל תיקייה - החדשים ביותר ראשון).")
 
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
-        futures = [executor.submit(process_file, p, model_size, summarize) for p, summarize in queue]
+        futures = [
+            executor.submit(process_file, p, model_size, summarize, extract_audio)
+            for p, summarize, extract_audio in queue
+        ]
         for f in futures:
             f.result()
 
