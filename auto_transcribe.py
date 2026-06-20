@@ -7,6 +7,7 @@
 
 import sys
 import os
+import re
 import time
 import subprocess
 import yaml
@@ -20,6 +21,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 AUDIO_EXT_PRIORITY = ["mp3", "wav", "m4a", "ogg", "flac", "aac", "wma", "mp4", "webm", "mkv"]
+RAW_TAG_RE = re.compile(r"(?i)\braw\b")
 
 
 def load_config():
@@ -42,6 +44,7 @@ def find_media_groups(folder: Path, recursive: bool, extensions: list[str], maxd
     """מאתר קבצי מדיה בתיקייה, מאחד audio+video עם אותו שם לקובץ אחד"""
     pattern = "**/*" if recursive else "*"
     candidates = [p for p in folder.glob(pattern) if p.is_file() and p.suffix.lower().lstrip(".") in extensions]
+    candidates = [p for p in candidates if not RAW_TAG_RE.search(p.stem)]
 
     if maxdays is not None:
         cutoff = time.time() - maxdays * 86400
@@ -155,7 +158,7 @@ def run_scan():
     queue: list[tuple[Path, bool]] = []
     for folder_cfg in config.get("folders") or []:
         folder = Path(folder_cfg["path"])
-        recursive = folder_cfg.get("recursive", False)
+        recursive = folder_cfg.get("recursive", True)
         summarize = folder_cfg.get("summarize", False)
         maxdays = folder_cfg.get("maxdays")
         if not folder.exists():
