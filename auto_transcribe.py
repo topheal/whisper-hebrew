@@ -19,12 +19,36 @@ from faster_whisper import WhisperModel
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
+CONFIG_DEFAULT_PATH = Path(__file__).parent / "config-default.yaml"
+LOCK_PATH = Path(__file__).parent / "scan.lock"
+STALE_LOCK_HOURS = 6  # אם סריקה קודמת "תקועה" יותר מזה - מתעלמים מהנעילה ומתחילים בכל זאת
 
 AUDIO_EXT_PRIORITY = ["mp3", "wav", "m4a", "ogg", "flac", "aac", "wma", "mp4", "webm", "mkv"]
 RAW_TAG_RE = re.compile(r"(?i)\braw\b")
 
 
+def acquire_lock() -> bool:
+    """מונע סריקה כפולה במקביל (לדוגמה: scan_now.bat הופעל בזמן שסריקה מתוזמנת עדיין רצה)"""
+    if LOCK_PATH.exists():
+        age_hours = (time.time() - LOCK_PATH.stat().st_mtime) / 3600
+        if age_hours < STALE_LOCK_HOURS:
+            return False
+        print(f"נמצא קובץ נעילה ישן ({age_hours:.1f} שעות) - מתעלם ומתחיל סריקה חדשה")
+    LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    return True
+
+
+def release_lock():
+    try:
+        LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def load_config():
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(CONFIG_DEFAULT_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"נוצר {CONFIG_PATH.name} מהתבנית - ערוך אותו והגדר את התיקיות שלך לפני הרצה נוספת.")
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -187,16 +211,26 @@ def run_scan():
     print("הסריקה הושלמה.")
 
 
+def run_scan_locked():
+    if not acquire_lock():
+        print("סריקה אחרת כבר רצה ברגע זה - מדלג על הסריקה הנוכחית.")
+        return
+    try:
+        run_scan()
+    finally:
+        release_lock()
+
+
 def main():
     if "--loop" in sys.argv:
         config = load_config()
         interval = config.get("scan_interval_minutes", 60) * 60
         while True:
-            run_scan()
+            run_scan_locked()
             print(f"מחכה {interval // 60} דקות לסריקה הבאה...")
             time.sleep(interval)
     else:
-        run_scan()
+        run_scan_locked()
 
 
 if __name__ == "__main__":

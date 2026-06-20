@@ -1,4 +1,6 @@
 uploads/
 scan_log.txt
+scan.lock
+config.yaml
 __pycache__/
 *.pyc
