@@ -9,11 +9,17 @@ import sys
 import os
 import re
 import time
+import shutil
 import subprocess
+import tempfile
+import wave
+import winreg
 import yaml
+import numpy as np
+import torch
 from pathlib import Path
 from datetime import timedelta
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from faster_whisper import WhisperModel
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -90,7 +96,7 @@ def find_media_groups(folder: Path, recursive: bool, extensions: list[str], maxd
 
 def outputs_for(media_path: Path) -> tuple[Path, Path]:
     srt_path = media_path.with_suffix(".srt")
-    summary_path = media_path.parent / f"{media_path.stem}_summary.txt"
+    summary_path = media_path.parent / f"{media_path.stem}_summary.md"
     return srt_path, summary_path
 
 
@@ -114,7 +120,14 @@ def format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
 
 
-def transcribe_to_srt(model: WhisperModel, media_path: Path) -> tuple[Path, str]:
+def format_minsec(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}:{secs:02d}"
+
+
+def transcribe_to_srt(
+    model: WhisperModel, media_path: Path, speaker_turns: list[tuple[float, float, str]] | None = None
+) -> tuple[Path, str]:
     segments, info = model.transcribe(
         str(media_path),
         language="he",
@@ -124,17 +137,21 @@ def transcribe_to_srt(model: WhisperModel, media_path: Path) -> tuple[Path, str]
     )
 
     srt_lines = []
-    full_text_lines = []
+    timestamped_lines = []
     for i, seg in enumerate(segments, start=1):
         start = format_srt_timestamp(seg.start)
         end = format_srt_timestamp(seg.end)
         text = seg.text.strip()
+        if speaker_turns:
+            speaker = speaker_for_segment(speaker_turns, seg.start, seg.end)
+            if speaker:
+                text = f"{speaker}: {text}"
         srt_lines.append(f"{i}\n{start} --> {end}\n{text}\n")
-        full_text_lines.append(text)
+        timestamped_lines.append(f"[{format_minsec(seg.start)}] {text}")
 
     srt_path, _ = outputs_for(media_path)
     srt_path.write_text("\n".join(srt_lines), encoding="utf-8")
-    return srt_path, "\n".join(full_text_lines)
+    return srt_path, "\n".join(timestamped_lines)
 
 
 def extract_audio_file(video_path: Path) -> Path:
@@ -148,29 +165,166 @@ def extract_audio_file(video_path: Path) -> Path:
     return audio_path
 
 
-def summarize_with_claude(text: str) -> str:
-    """מפעיל את Claude Code במצב headless (claude -p) - דרך המנוי הקיים, בלי מפתח API נפרד"""
-    prompt = (
-        "להלן תמלול שיחה בעברית. סכם אותה בקצרה: נושא השיחה, נקודות מרכזיות, "
-        "החלטות שהתקבלו ומשימות להמשך (אם יש). כתוב בעברית, בפורמט נקודות, בלי הקדמות.\n\n"
-        f"תמלול:\n{text}"
+def get_hf_token() -> str | None:
+    """מאחזר HF_TOKEN ממשתני סביבה, ואם לא נמצא - מהרישום (סשנים ישנים לא תמיד רואים משתנה שנוסף אחרי שנפתחו)"""
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        return token
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            return winreg.QueryValueEx(key, "HF_TOKEN")[0]
+    except (FileNotFoundError, OSError):
+        return None
+
+
+_diarization_pipeline = None
+
+
+def get_diarization_pipeline():
+    """טוען את צינור זיהוי הדוברים פעם אחת בלבד (טעינה איטית), ומשתמש בו חזרה לכל הקבצים בסריקה"""
+    global _diarization_pipeline
+    if _diarization_pipeline is None:
+        token = get_hf_token()
+        if not token:
+            raise RuntimeError(
+                "לא נמצא HF_TOKEN - נדרש לזיהוי דוברים. ראה הוראות התקנה ב-README."
+            )
+        from pyannote.audio import Pipeline
+        _diarization_pipeline = Pipeline.from_pretrained(
+            "ivrit-ai/pyannote-speaker-diarization-3.1", token=token
+        )
+    return _diarization_pipeline
+
+
+def decode_to_waveform(media_path: Path) -> tuple["torch.Tensor", int]:
+    """מפענח קובץ מדיה ל-waveform בזיכרון דרך ffmpeg, בלי תלות ב-torchcodec (שבור על Windows)"""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = Path(tmp.name)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(media_path), "-ar", "16000", "-ac", "1", "-f", "wav", str(wav_path)],
+            capture_output=True,
+            check=True,
+        )
+        with wave.open(str(wav_path), "rb") as wf:
+            sample_rate = wf.getframerate()
+            raw = wf.readframes(wf.getnframes())
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        waveform = torch.from_numpy(data).unsqueeze(0)
+        return waveform, sample_rate
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+
+def diarize_audio(media_path: Path) -> list[tuple[float, float, str]]:
+    """מחזיר רשימת טווחי זמן לפי דובר: [(start, end, 'דובר א'), ...], מסודר כרונולוגית"""
+    pipeline = get_diarization_pipeline()
+    waveform, sample_rate = decode_to_waveform(media_path)
+    result = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+
+    raw_turns = sorted(
+        result.speaker_diarization.itertracks(yield_label=True),
+        key=lambda item: item[0].start,
+    )
+    label_names = {}
+    hebrew_letters = "אבגדהוזחטיכלמנסעפצקרשת"
+    turns = []
+    for turn, _, speaker in raw_turns:
+        if speaker not in label_names:
+            label_names[speaker] = f"דובר {hebrew_letters[len(label_names) % len(hebrew_letters)]}'"
+        turns.append((turn.start, turn.end, label_names[speaker]))
+    return turns
+
+
+def speaker_for_segment(turns: list[tuple[float, float, str]], seg_start: float, seg_end: float) -> str | None:
+    """מוצא את הדובר עם החפיפה הגדולה ביותר לטווח הזמן של קטע התמלול"""
+    best_label, best_overlap = None, 0.0
+    for t_start, t_end, label in turns:
+        overlap = min(seg_end, t_end) - max(seg_start, t_start)
+        if overlap > best_overlap:
+            best_overlap, best_label = overlap, label
+    return best_label
+
+
+SUMMARY_FORMAT_EXAMPLE = """0:01 גיוס קשב, התמדה, אנרגייה וזמן ליישום התכנית.
+1:18 מדיטציה קצרה
+8:04 שיעור קצר - איך מגייסים קשב כדי להקשיב לתכנית, להקשיב לעצמנו.
+28:17 *שאלות ותשובות*
+28:20 מה עושים כשאין לי כסף
+30:36 איך מעוררים מוטיבציה לשינוי הרגלים
+34:30 תאורה"""
+
+TIMESTAMP_LINE_RE = re.compile(r"^(\d+):(\d{2})\b")
+
+
+def build_summary_prompt(timestamped_text: str) -> str:
+    return (
+        "להלן רצף משפטים מתוזמנים (בפורמט [דקות:שניות] טקסט) של שיעור/שיחה בעברית. "
+        "הפק ממנו שני חלקים, בדיוק בפורמט הזה (כותרות Markdown מדויקות, בלי שינוי):\n\n"
+        "## סיכום\n"
+        "סיכום תמציתי בנקודות (בולטים) של הנקודות העיקריות שהדובר העביר - בלי תזמונים, בלי הקדמות ובלי הסברים.\n\n"
+        "## תוכן עניינים\n"
+        "תוכן עניינים מתוזמן - שורות בפורמט 'דקות:שניות נושא קצר', בסדר כרונולוגי מההתחלה לסוף בלבד "
+        "(קח את הזמן מהרצף עצמו, אל תמציא ואל תשנה את הסדר הכרונולוגי). "
+        "אם יש קטע שאלות ותשובות, סמן את ההתחלה שלו כ-'*שאלות ותשובות*' ואז כל שאלה בנפרד מתחתיו "
+        "באותו אופן. דוגמה לפורמט החלק הזה:\n\n"
+        f"{SUMMARY_FORMAT_EXAMPLE}\n\n"
+        f"הרצף המתוזמן:\n{timestamped_text}"
     )
 
-    result = subprocess.run(
-        ["claude", "-p", prompt],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=300,
-    )
+
+def enforce_chronological_order(summary_text: str) -> str:
+    """רשת ביטחון: מסדר מחדש את שורות תוכן העניינים לפי הזמן, ללא תלות בסדר שקלוד החזיר"""
+    marker = "## תוכן עניינים"
+    idx = summary_text.find(marker)
+    if idx == -1:
+        return summary_text
+
+    head = summary_text[: idx + len(marker)]
+    toc_lines = summary_text[idx + len(marker):].split("\n")
+
+    def time_key(ln: str):
+        m = TIMESTAMP_LINE_RE.match(ln.strip())
+        return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+    timed = [ln for ln in toc_lines if time_key(ln) is not None]
+    if not timed:
+        return summary_text
+
+    timed_sorted = sorted(timed, key=time_key)
+    leading = toc_lines[: toc_lines.index(timed[0])]
+    return head + "\n".join(leading + timed_sorted) + "\n"
+
+
+def run_claude_prompt(prompt: str) -> str:
+    """מפעיל את Claude Code במצב headless (claude -p) - דרך המנוי הקיים, בלי מפתח API נפרד"""
+    claude_path = shutil.which("claude.cmd") or shutil.which("claude") or "claude"
+    try:
+        result = subprocess.run(
+            [claude_path, "-p", "--tools", "", "--disable-slash-commands"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900,
+            cwd=tempfile.gettempdir(),
+        )
+    except subprocess.TimeoutExpired:
+        return "(נכשל: claude -p לא הגיב בזמן)"
     if result.returncode != 0:
-        return f"(סיכום נכשל: {result.stderr.strip()})"
+        return f"(נכשל: {result.stderr.strip()})"
     return result.stdout.strip()
 
 
-def process_file(media_path: Path, model_size: str, summarize: bool, extract_audio: bool):
-    if extract_audio and media_path.suffix.lower().lstrip(".") in VIDEO_EXTENSIONS:
+def summarize_with_claude(timestamped_text: str) -> str:
+    """מפיק סיכום בנקודות ותוכן עניינים מתוזמן בקריאה אחת ל-claude -p, ומבטיח סדר כרונולוגי"""
+    result = run_claude_prompt(build_summary_prompt(timestamped_text))
+    return enforce_chronological_order(result)
+
+
+def process_file(media_path: Path, model_size: str, summarize: bool, diarize: bool = False):
+    if media_path.suffix.lower().lstrip(".") in VIDEO_EXTENSIONS:
         audio_path = media_path.with_suffix(".mp3")
         if not audio_path.exists():
             print(f"[{media_path.name}] מחלץ קובץ אודיו...")
@@ -180,33 +334,41 @@ def process_file(media_path: Path, model_size: str, summarize: bool, extract_aud
             except subprocess.CalledProcessError as e:
                 print(f"[{media_path.name}] חילוץ אודיו נכשל: {e}")
 
+    speaker_turns = None
+    if diarize:
+        print(f"[{media_path.name}] מזהה דוברים...")
+        try:
+            speaker_turns = diarize_audio(media_path)
+            n_speakers = len({label for _, _, label in speaker_turns})
+            print(f"[{media_path.name}] זוהו {n_speakers} דוברים")
+        except Exception as e:
+            print(f"[{media_path.name}] זיהוי דוברים נכשל, ממשיך בלי תיוג דוברים: {e}")
+
     print(f"[{media_path.name}] טוען מודל ומתמלל...")
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    srt_path, full_text = transcribe_to_srt(model, media_path)
+    srt_path, timestamped_text = transcribe_to_srt(model, media_path, speaker_turns)
     print(f"[{media_path.name}] תמלול נשמר: {srt_path.name}")
 
     if not summarize:
         return
 
     print(f"[{media_path.name}] מסכם עם Claude Code...")
-    summary = summarize_with_claude(full_text)
+    summary = summarize_with_claude(timestamped_text)
     _, summary_path = outputs_for(media_path)
     summary_path.write_text(summary, encoding="utf-8")
     print(f"[{media_path.name}] סיכום נשמר: {summary_path.name}")
 
 
-def run_scan():
-    config = load_config()
-    extensions = config.get("extensions", [])
-    max_parallel = config.get("max_parallel", 1)
-    model_size = config.get("model_size", "medium")
-
+def build_queue(
+    folder_cfgs: list[dict], extensions: list[str], exclude: set[Path] = frozenset()
+) -> list[tuple[Path, bool, bool]]:
+    """בונה את התור מחדש מהדיסק - כך שקובץ שנוסף בזמן הסריקה יתפוס את מקומו (לפי עדיפות תיקייה, חדש-ביותר ראשון בתוכה)"""
     queue: list[tuple[Path, bool, bool]] = []
-    for folder_cfg in config.get("folders") or []:
+    for folder_cfg in folder_cfgs:
         folder = Path(folder_cfg["path"])
         recursive = folder_cfg.get("recursive", True)
         summarize = folder_cfg.get("summarize", False)
-        extract_audio = folder_cfg.get("extract_audio", False)
+        diarize = folder_cfg.get("diarize", False)
         maxdays = folder_cfg.get("maxdays")
         if not folder.exists():
             print(f"אזהרה: התיקייה לא נמצאה: {folder}")
@@ -215,26 +377,47 @@ def run_scan():
         folder_files = [
             media_path
             for media_path in find_media_groups(folder, recursive, extensions, maxdays)
-            if needs_processing(media_path, summarize) and is_stable(media_path)
+            if media_path not in exclude and needs_processing(media_path, summarize) and is_stable(media_path)
         ]
         folder_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        queue.extend((media_path, summarize, extract_audio) for media_path in folder_files)
+        queue.extend((media_path, summarize, diarize) for media_path in folder_files)
+    return queue
 
-    if not queue:
-        print("אין קבצים חדשים לתמלל.")
-        return
 
-    print(f"נמצאו {len(queue)} קבצים לתמלול (לפי סדר עדיפות התיקיות, ובתוך כל תיקייה - החדשים ביותר ראשון).")
+def run_scan():
+    config = load_config()
+    extensions = config.get("extensions", [])
+    max_parallel = config.get("max_parallel", 1)
+    model_size = config.get("model_size", "medium")
+    folder_cfgs = config.get("folders") or []
+
+    in_flight: set[Path] = set()
+    processed = 0
 
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
-        futures = [
-            executor.submit(process_file, p, model_size, summarize, extract_audio)
-            for p, summarize, extract_audio in queue
-        ]
-        for f in futures:
-            f.result()
+        futures: dict = {}
+        while True:
+            while len(futures) < max_parallel:
+                next_item = next(iter(build_queue(folder_cfgs, extensions, exclude=in_flight)), None)
+                if next_item is None:
+                    break
+                media_path, summarize, diarize = next_item
+                in_flight.add(media_path)
+                fut = executor.submit(process_file, media_path, model_size, summarize, diarize)
+                futures[fut] = media_path
 
-    print("הסריקה הושלמה.")
+            if not futures:
+                break
+
+            done = next(as_completed(futures))
+            done.result()
+            in_flight.discard(futures.pop(done))
+            processed += 1
+
+    if processed == 0:
+        print("אין קבצים חדשים לתמלל.")
+    else:
+        print(f"הסריקה הושלמה ({processed} קבצים).")
 
 
 def run_scan_locked():

@@ -10,10 +10,11 @@ folders:
   #
   # recursive: true (ברירת מחדל, אין צורך לכתוב) = סורק גם תתי-תיקיות
   # summarize: false (או לא לכתוב כלל)            = ברירת המחדל - רק SRT, מנוע מקומי, בלי Claude Code
-  # summarize: true                               = בנוסף ל-SRT, גם _summary.txt דרך claude -p
+  # summarize: true                               = בנוסף ל-SRT, גם _summary.md עם סיכום בנקודות ותוכן עניינים מתוזמן (דרך claude -p)
+  # diarize: false (או לא לכתוב כלל)               = ברירת המחדל - בלי תיוג דוברים
+  # diarize: true                                  = מתייג כל שורה ב-SRT (ובסיכום) עם "דובר א'/ב'..." (דורש HF_TOKEN, ראה README)
   # maxdays: N                                    = לתמלל רק קבצים שהשתנו/נוצרו בN הימים האחרונים (לא לכתוב = בלי הגבלה)
-  # extract_audio: false (או לא לכתוב כלל)        = ברירת המחדל - לא ליצור קובץ אודיו מקובצי וידאו
-  # extract_audio: true                           = אם יש רק קובץ וידאו (בלי אודיו תואם), ליצור גם קובץ mp3 לצידו (ffmpeg) - נוח להאזנה
+  # אם קובץ הוא וידאו בלבד (בלי קובץ אודיו תואם) - נוצר אוטומטית גם קובץ mp3 לצידו (ffmpeg), לנוחות האזנה
   # קבצים שבשמם מופיעה "raw" (בכל צורת אותיות) מדולגים תמיד - נחשבים גרסת גלם
   #
   # - path: 'G:\האחסון שלי\תיקייה לדוגמה'
@@ -22,7 +23,10 @@ folders:
   # - path: 'C:\Users\admin\Downloads\שיחות חשובות'
   #   recursive: false
   #   summarize: true
-  #   extract_audio: true
+  #
+  # - path: 'C:\Users\admin\Downloads\שיחות זום'
+  #   recursive: false
+  #   diarize: true
 
 # כל כמה דקות לסרוק את התיקיות ברקע (60 = שעה)
 scan_interval_minutes: 60
@@ -30,8 +34,11 @@ scan_interval_minutes: 60
 # כמה קבצים לתמלל במקביל (כל קובץ במקביל טוען מודל בנפרד -> צריך יותר RAM)
 max_parallel: 1
 
-# גודל מודל Whisper: tiny, base, small, medium, large-v3
-model_size: medium
+# מודל Whisper. אפשר גודל גנרי (tiny/base/small/medium/large-v3),
+# או מודל מכוון-עדינות לעברית מ-ivrit.ai (מומלץ - דיוק גבוה משמעותית מהגנרי):
+#   ivrit-ai/whisper-large-v3-turbo-ct2  - מהיר (x3-4 מ-large-v3), מומלץ כברירת מחדל
+#   ivrit-ai/whisper-large-v3-ct2        - הכי מדויק, איטי יותר
+model_size: ivrit-ai/whisper-large-v3-turbo-ct2
 
 # פורמטים נתמכים (לא צריך לשנות בד"כ)
 extensions:
