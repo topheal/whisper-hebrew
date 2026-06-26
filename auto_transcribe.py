@@ -177,10 +177,44 @@ def get_hf_token() -> str | None:
         return None
 
 
+def setup_device() -> tuple[str, str]:
+    """בודק אם יש GPU עם מספיק VRAM. מתקין PyTorch+CUDA אוטומטית אם צריך ומאתחל מחדש.
+    מחזיר (device, compute_type) — 'cuda'/'float16' אם GPU זמין, 'cpu'/'int8' אחרת."""
+    try:
+        smi = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if smi.returncode != 0:
+            return "cpu", "int8"
+        name, vram_str = smi.stdout.strip().split("\n")[0].rsplit(",", 1)
+        gpu_name, vram_mb = name.strip(), int(vram_str.strip())
+    except Exception:
+        return "cpu", "int8"
+
+    if vram_mb < 2000:
+        print(f"GPU {gpu_name} ({vram_mb}MB VRAM) — VRAM לא מספיק, עובד עם CPU")
+        return "cpu", "int8"
+
+    if not torch.cuda.is_available():
+        print(f"GPU {gpu_name} ({vram_mb // 1024}GB VRAM) — מתקין PyTorch+CUDA (כ-2GB, פעם אחת בלבד)...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
+             "torch", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu124"],
+            check=True,
+        )
+        print("התקנה הושלמה — מאתחל מחדש...")
+        subprocess.Popen([sys.executable] + sys.argv)
+        sys.exit(0)
+
+    print(f"GPU: {gpu_name} ({vram_mb // 1024}GB VRAM) — CUDA פעיל")
+    return "cuda", "float16"
+
+
 _diarization_pipeline = None
 
 
-def get_diarization_pipeline():
+def get_diarization_pipeline(device: str = "cpu"):
     """טוען את צינור זיהוי הדוברים פעם אחת בלבד (טעינה איטית), ומשתמש בו חזרה לכל הקבצים בסריקה"""
     global _diarization_pipeline
     if _diarization_pipeline is None:
@@ -193,6 +227,8 @@ def get_diarization_pipeline():
         _diarization_pipeline = Pipeline.from_pretrained(
             "ivrit-ai/pyannote-speaker-diarization-3.1", token=token
         )
+        if device == "cuda":
+            _diarization_pipeline = _diarization_pipeline.to(torch.device("cuda"))
     return _diarization_pipeline
 
 
@@ -216,9 +252,9 @@ def decode_to_waveform(media_path: Path) -> tuple["torch.Tensor", int]:
         wav_path.unlink(missing_ok=True)
 
 
-def diarize_audio(media_path: Path) -> list[tuple[float, float, str]]:
+def diarize_audio(media_path: Path, device: str = "cpu") -> list[tuple[float, float, str]]:
     """מחזיר רשימת טווחי זמן לפי דובר: [(start, end, 'דובר א'), ...], מסודר כרונולוגית"""
-    pipeline = get_diarization_pipeline()
+    pipeline = get_diarization_pipeline(device)
     waveform, sample_rate = decode_to_waveform(media_path)
     result = pipeline({"waveform": waveform, "sample_rate": sample_rate})
 
@@ -323,7 +359,8 @@ def summarize_with_claude(timestamped_text: str) -> str:
     return enforce_chronological_order(result)
 
 
-def process_file(media_path: Path, model_size: str, summarize: bool, diarize: bool = False):
+def process_file(media_path: Path, model_size: str, summarize: bool, diarize: bool = False,
+                 device: str = "cpu", compute_type: str = "int8"):
     if media_path.suffix.lower().lstrip(".") in VIDEO_EXTENSIONS:
         audio_path = media_path.with_suffix(".mp3")
         if not audio_path.exists():
@@ -338,14 +375,14 @@ def process_file(media_path: Path, model_size: str, summarize: bool, diarize: bo
     if diarize:
         print(f"[{media_path.name}] מזהה דוברים...")
         try:
-            speaker_turns = diarize_audio(media_path)
+            speaker_turns = diarize_audio(media_path, device)
             n_speakers = len({label for _, _, label in speaker_turns})
             print(f"[{media_path.name}] זוהו {n_speakers} דוברים")
         except Exception as e:
             print(f"[{media_path.name}] זיהוי דוברים נכשל, ממשיך בלי תיוג דוברים: {e}")
 
     print(f"[{media_path.name}] טוען מודל ומתמלל...")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    model = WhisperModel(model_size, device=device, compute_type=compute_type)
     srt_path, timestamped_text = transcribe_to_srt(model, media_path, speaker_turns)
     print(f"[{media_path.name}] תמלול נשמר: {srt_path.name}")
 
@@ -391,6 +428,7 @@ def run_scan():
     model_size = config.get("model_size", "medium")
     folder_cfgs = config.get("folders") or []
 
+    device, compute_type = setup_device()
     in_flight: set[Path] = set()
     processed = 0
 
@@ -403,7 +441,7 @@ def run_scan():
                     break
                 media_path, summarize, diarize = next_item
                 in_flight.add(media_path)
-                fut = executor.submit(process_file, media_path, model_size, summarize, diarize)
+                fut = executor.submit(process_file, media_path, model_size, summarize, diarize, device, compute_type)
                 futures[fut] = media_path
 
             if not futures:
