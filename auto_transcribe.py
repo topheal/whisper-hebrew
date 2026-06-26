@@ -136,16 +136,21 @@ def transcribe_to_srt(
         vad_parameters={"min_silence_duration_ms": 500},
     )
 
+    unique_speakers = {label for _, _, label in speaker_turns} if speaker_turns else set()
+    active_turns = speaker_turns if len(unique_speakers) >= 2 else None
+    prev_speaker: str | None = None
+
     srt_lines = []
     timestamped_lines = []
     for i, seg in enumerate(segments, start=1):
         start = format_srt_timestamp(seg.start)
         end = format_srt_timestamp(seg.end)
         text = seg.text.strip()
-        if speaker_turns:
-            speaker = speaker_for_segment(speaker_turns, seg.start, seg.end)
-            if speaker:
+        if active_turns:
+            speaker = speaker_for_segment(active_turns, seg.start, seg.end)
+            if speaker and speaker != prev_speaker:
                 text = f"{speaker}: {text}"
+                prev_speaker = speaker
         srt_lines.append(f"{i}\n{start} --> {end}\n{text}\n")
         timestamped_lines.append(f"[{format_minsec(seg.start)}] {text}")
 
