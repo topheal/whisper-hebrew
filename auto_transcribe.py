@@ -80,8 +80,8 @@ def find_media_groups(folder: Path, recursive: bool, extensions: list[str], maxd
     candidates = [p for p in folder.glob(pattern) if p.is_file() and p.suffix.lower().lstrip(".") in extensions]
     candidates = [p for p in candidates if not RAW_TAG_RE.search(p.stem)]
 
-    if maxdays is not None:
-        cutoff = time.time() - maxdays * 86400
+    if maxdays is not None and maxdays != "all":
+        cutoff = time.time() - float(maxdays) * 86400
         candidates = [p for p in candidates if p.stat().st_mtime >= cutoff]
 
     groups: dict[str, list[Path]] = {}
@@ -434,6 +434,28 @@ def build_queue(
     return queue
 
 
+def ensure_mp3_companions(folder_cfgs: list[dict]) -> None:
+    """לכל תיקייה עם extract_audio:true — יוצר MP3 לצד כל וידאו שחסר לו קובץ שמע"""
+    for folder_cfg in folder_cfgs:
+        if not folder_cfg.get("extract_audio", False):
+            continue
+        folder = Path(folder_cfg["path"])
+        if not folder.exists():
+            continue
+        recursive = folder_cfg.get("recursive", True)
+        pattern = "**/*" if recursive else "*"
+        for p in folder.glob(pattern):
+            if p.is_file() and p.suffix.lower().lstrip(".") in VIDEO_EXTENSIONS:
+                mp3_path = p.with_suffix(".mp3")
+                if not mp3_path.exists():
+                    print(f"[{p.name}] יוצר MP3 מלווה...")
+                    try:
+                        extract_audio_file(p)
+                        print(f"[{p.name}] MP3 נשמר: {mp3_path.name}")
+                    except Exception as e:
+                        print(f"[{p.name}] חילוץ MP3 נכשל: {e}")
+
+
 def run_scan():
     config = load_config()
     extensions = config.get("extensions", [])
@@ -441,6 +463,7 @@ def run_scan():
     model_size = config.get("model_size", "medium")
     folder_cfgs = config.get("folders") or []
 
+    ensure_mp3_companions(folder_cfgs)
     device, compute_type = setup_device()
     in_flight: set[Path] = set()
     processed = 0
