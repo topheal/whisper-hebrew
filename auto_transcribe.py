@@ -396,7 +396,11 @@ def process_file(media_path: Path, model_size: str, summarize: bool, diarize: bo
 
     print(f"[{media_path.name}] טוען מודל ומתמלל...")
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    srt_path, timestamped_text = transcribe_to_srt(model, media_path, speaker_turns)
+    try:
+        srt_path, timestamped_text = transcribe_to_srt(model, media_path, speaker_turns)
+    except Exception as e:
+        print(f"[{media_path.name}] תמלול נכשל, מדלג: {e}")
+        return
     print(f"[{media_path.name}] תמלול נשמר: {srt_path.name}")
 
     if not summarize:
