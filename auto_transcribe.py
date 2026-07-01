@@ -24,6 +24,9 @@ from faster_whisper import WhisperModel
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# Windows: מונע פתיחת חלון קונסולה שחור לכל תהליך-בן
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 CONFIG_DEFAULT_PATH = Path(__file__).parent / "config-default.yaml"
 LOCK_PATH = Path(__file__).parent / "scan.lock"
@@ -166,6 +169,7 @@ def extract_audio_file(video_path: Path) -> Path:
         ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "libmp3lame", "-q:a", "4", str(audio_path)],
         capture_output=True,
         check=True,
+        creationflags=_NO_WINDOW,
     )
     return audio_path
 
@@ -189,6 +193,7 @@ def setup_device() -> tuple[str, str]:
         smi = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
+            creationflags=_NO_WINDOW,
         )
         if smi.returncode != 0:
             return "cpu", "int8"
@@ -207,9 +212,10 @@ def setup_device() -> tuple[str, str]:
             [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
              "torch", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu124"],
             check=True,
+            creationflags=_NO_WINDOW,
         )
         print("התקנה הושלמה — מאתחל מחדש...")
-        subprocess.Popen([sys.executable] + sys.argv)
+        subprocess.Popen([sys.executable] + sys.argv, creationflags=_NO_WINDOW)
         sys.exit(0)
 
     print(f"GPU: {gpu_name} ({vram_mb // 1024}GB VRAM) — CUDA פעיל")
@@ -246,6 +252,7 @@ def decode_to_waveform(media_path: Path) -> tuple["torch.Tensor", int]:
             ["ffmpeg", "-y", "-i", str(media_path), "-ar", "16000", "-ac", "1", "-f", "wav", str(wav_path)],
             capture_output=True,
             check=True,
+            creationflags=_NO_WINDOW,
         )
         with wave.open(str(wav_path), "rb") as wf:
             sample_rate = wf.getframerate()
@@ -349,6 +356,7 @@ def run_claude_prompt(prompt: str) -> str:
             encoding="utf-8",
             errors="replace",
             timeout=900,
+            creationflags=_NO_WINDOW,
             cwd=tempfile.gettempdir(),
         )
     except subprocess.TimeoutExpired:
